@@ -24,18 +24,20 @@ def _encode_state(game: "Game", player_id: int) -> Tuple:
     """
     Encode a compact, hashable state representation for Q-table lookup.
     We intentionally keep the state space small so tabular Q-learning is feasible.
+    Phase is omitted because action strings already encode which phase the
+    agent is in (e.g. ``"nominate_3"`` vs ``"vote_ja"``).
     """
     board = game.board
     obs = game.get_observation(player_id)
     role = game.players[player_id].role
 
-    # Discretise suspicion broadly — we don't track it in base state
     fascist_policies = min(board.fascist_policies, 6)
     liberal_policies = min(board.liberal_policies, 5)
     election_tracker = board.election_tracker
     alive_count = len(game.alive_players)
     my_party = role.party.value  # "Liberal" | "Fascist"
-    phase = game.phase.name
+    is_president = game.president_idx == player_id
+    is_chancellor = game.chancellor_idx == player_id if game.chancellor_idx is not None else False
 
     return (
         my_party,
@@ -43,8 +45,28 @@ def _encode_state(game: "Game", player_id: int) -> Tuple:
         liberal_policies,
         election_tracker,
         alive_count,
-        phase,
+        is_president,
+        is_chancellor,
     )
+
+
+def step_reward(game: "Game", player_id: int) -> float:
+    """Return a small intermediate reward based on the last enacted policy.
+
+    +0.05 when a policy matching the player's side is enacted,
+    -0.05 for the opposing side.  Returns 0.0 when no signal can be
+    inferred (e.g. no policy enacted yet).
+
+    .. note::
+
+       This standalone helper cannot detect *which* policy was most
+       recently enacted on its own.  The training loop in ``train.py``
+       uses :func:`_step_reward_from_delta` instead, which compares
+       board snapshots before and after each game step.  This function
+       is provided as a convenience API but always returns 0.0 without
+       before/after context.
+    """
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +107,9 @@ class RLAgent(BaseAgent):
         self._last_state: Optional[Tuple] = None
         self._last_action: Optional[str] = None
 
+        # Per-episode trajectory: list of (state, action, intermediate_reward)
+        self._trajectory: List[Tuple] = []
+
         if qtable_path and os.path.exists(qtable_path):
             self.load(qtable_path)
 
@@ -122,6 +147,63 @@ class RLAgent(BaseAgent):
     def _record(self, state: Tuple, action: str) -> None:
         self._last_state = state
         self._last_action = action
+        # Also append to trajectory with 0 intermediate reward (may be updated later)
+        self._trajectory.append((state, action, 0.0))
+
+    def record_step_reward(self, reward: float) -> None:
+        """Attach an intermediate reward to the most recent trajectory step."""
+        if self._trajectory:
+            s, a, old_r = self._trajectory[-1]
+            self._trajectory[-1] = (s, a, old_r + reward)
+
+    def reset_episode(self) -> None:
+        """Clear trajectory at the start of a new game episode."""
+        self._trajectory = []
+        self._last_state = None
+        self._last_action = None
+
+    def end_episode(self, final_reward: float) -> None:
+        """Propagate *final_reward* backwards through the full trajectory
+        using discounted Q-learning updates.
+
+        For each step (working backwards):
+        - The *next_state* is the state of the following step (or ``None``
+          for the terminal step).
+        - The reward is the step's intermediate reward, plus the
+          *final_reward* for the last step only.
+
+        Three backward passes are performed so that Q-value updates from
+        later states can bootstrap into earlier ones more effectively.
+        """
+        if not self._trajectory:
+            return
+
+        num_steps = len(self._trajectory)
+        for _iteration in range(3):
+            for i in range(num_steps - 1, -1, -1):
+                s, a, intermediate_r = self._trajectory[i]
+
+                # Determine next state
+                if i < num_steps - 1:
+                    next_s = self._trajectory[i + 1][0]
+                else:
+                    next_s = None  # terminal
+
+                # Reward: intermediate shaping + final reward only on last step
+                r = intermediate_r
+                if i == num_steps - 1:
+                    r += final_reward
+
+                # Standard Q-learning update
+                max_future = 0.0
+                if next_s and self._qtable.get(next_s):
+                    max_future = max(self._qtable[next_s].values())
+                old = self._q(s, a)
+                new = old + self.alpha * (r + self.gamma * max_future - old)
+                self._qtable.setdefault(s, {})[a] = new
+
+        # Reset for next episode
+        self.reset_episode()
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -144,17 +226,39 @@ class RLAgent(BaseAgent):
 
     def president_discard(self, game: "Game", tiles: List["Party"]) -> int:
         state = _encode_state(game, self.player_id)
-        actions = [f"pres_discard_{i}" for i in range(len(tiles))]
+        # Use semantic actions (tile type) so the agent can learn which
+        # type of policy to discard regardless of tile ordering.
+        seen = set()
+        actions = []
+        for tile in tiles:
+            label = f"pres_discard_{tile.value}"
+            if label not in seen:
+                seen.add(label)
+                actions.append(label)
         chosen = self._choose(state, actions)
         self._record(state, chosen)
-        return int(chosen.split("_")[-1])
+        target_type = chosen.split("_", 2)[2]  # "Liberal" or "Fascist"
+        for i, tile in enumerate(tiles):
+            if tile.value == target_type:
+                return i
+        return 0  # fallback
 
     def chancellor_discard(self, game: "Game", tiles: List["Party"]) -> int:
         state = _encode_state(game, self.player_id)
-        actions = [f"chan_discard_{i}" for i in range(len(tiles))]
+        seen = set()
+        actions = []
+        for tile in tiles:
+            label = f"chan_discard_{tile.value}"
+            if label not in seen:
+                seen.add(label)
+                actions.append(label)
         chosen = self._choose(state, actions)
         self._record(state, chosen)
-        return int(chosen.split("_")[-1])
+        target_type = chosen.split("_", 2)[2]
+        for i, tile in enumerate(tiles):
+            if tile.value == target_type:
+                return i
+        return 0  # fallback
 
     def choose_investigate_target(self, game: "Game") -> int:
         state = _encode_state(game, self.player_id)
