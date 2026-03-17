@@ -51,20 +51,13 @@ def _encode_state(game: "Game", player_id: int) -> Tuple:
 
 
 def step_reward(game: "Game", player_id: int) -> float:
-    """Return a small intermediate reward based on the last enacted policy.
+    """Placeholder for intermediate reward based on the last enacted policy.
 
-    +0.05 when a policy matching the player's side is enacted,
-    -0.05 for the opposing side.  Returns 0.0 when no signal can be
-    inferred (e.g. no policy enacted yet).
-
-    .. note::
-
-       This standalone helper cannot detect *which* policy was most
-       recently enacted on its own.  The training loop in ``train.py``
-       uses :func:`_step_reward_from_delta` instead, which compares
-       board snapshots before and after each game step.  This function
-       is provided as a convenience API but always returns 0.0 without
-       before/after context.
+    Always returns 0.0 because detecting a policy change requires
+    before/after board snapshots.  The training loop in ``train.py``
+    uses :func:`_step_reward_from_delta` instead, which compares
+    board state before and after each game step to provide +0.1 / -0.1
+    rewards.
     """
     return 0.0
 
@@ -209,6 +202,31 @@ class RLAgent(BaseAgent):
     # BaseAgent interface
     # ------------------------------------------------------------------
 
+    def _choose_discard(self, game: "Game", tiles: List["Party"], prefix: str) -> int:
+        """Choose which tile to discard using semantic (type-based) actions.
+
+        Returns the index into *tiles* of the tile the agent wants to discard.
+        *prefix* distinguishes president (``"pres_discard"``) from chancellor
+        (``"chan_discard"``) actions.
+        """
+        state = _encode_state(game, self.player_id)
+        seen: set[str] = set()
+        actions: list[str] = []
+        for tile in tiles:
+            label = f"{prefix}_{tile.value}"
+            if label not in seen:
+                seen.add(label)
+                actions.append(label)
+        chosen = self._choose(state, actions)
+        self._record(state, chosen)
+        # Extract tile type after the last underscore of the prefix
+        # e.g. "pres_discard_Liberal" → "Liberal"
+        target_type = chosen.split("_", 2)[2]
+        for i, tile in enumerate(tiles):
+            if tile.value == target_type:
+                return i
+        return 0  # fallback
+
     def nominate_chancellor(self, game: "Game") -> int:
         state = _encode_state(game, self.player_id)
         eligible = [p.player_id for p in game.eligible_chancellors()]
@@ -225,40 +243,10 @@ class RLAgent(BaseAgent):
         return chosen == "vote_ja"
 
     def president_discard(self, game: "Game", tiles: List["Party"]) -> int:
-        state = _encode_state(game, self.player_id)
-        # Use semantic actions (tile type) so the agent can learn which
-        # type of policy to discard regardless of tile ordering.
-        seen = set()
-        actions = []
-        for tile in tiles:
-            label = f"pres_discard_{tile.value}"
-            if label not in seen:
-                seen.add(label)
-                actions.append(label)
-        chosen = self._choose(state, actions)
-        self._record(state, chosen)
-        target_type = chosen.split("_", 2)[2]  # "Liberal" or "Fascist"
-        for i, tile in enumerate(tiles):
-            if tile.value == target_type:
-                return i
-        return 0  # fallback
+        return self._choose_discard(game, tiles, "pres_discard")
 
     def chancellor_discard(self, game: "Game", tiles: List["Party"]) -> int:
-        state = _encode_state(game, self.player_id)
-        seen = set()
-        actions = []
-        for tile in tiles:
-            label = f"chan_discard_{tile.value}"
-            if label not in seen:
-                seen.add(label)
-                actions.append(label)
-        chosen = self._choose(state, actions)
-        self._record(state, chosen)
-        target_type = chosen.split("_", 2)[2]
-        for i, tile in enumerate(tiles):
-            if tile.value == target_type:
-                return i
-        return 0  # fallback
+        return self._choose_discard(game, tiles, "chan_discard")
 
     def choose_investigate_target(self, game: "Game") -> int:
         state = _encode_state(game, self.player_id)

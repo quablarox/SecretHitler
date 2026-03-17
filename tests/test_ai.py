@@ -251,7 +251,7 @@ class TestRLAgentTrajectory:
         agent.record_step_reward(0.1)
         agent.record_step_reward(0.05)
         s, a, r = agent._trajectory[-1]
-        assert abs(r - 0.15) < 1e-9
+        assert r == pytest.approx(0.15)
 
     def test_end_episode_with_empty_trajectory(self):
         agent = RLAgent(0, seed=0)

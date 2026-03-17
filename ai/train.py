@@ -335,7 +335,7 @@ def evaluate(
     }
 
     print(
-        f"  vs {opponent_type:>6}: "
+        f"  vs {opponent_type:<6}: "
         f"win rate {result['win_rate']:.2%} ({wins}/{total}) | "
         f"as Liberal {result['liberal_win_rate']:.2%} ({liberal_wins}/{liberal_total}) | "
         f"as Fascist {result['fascist_win_rate']:.2%} ({fascist_wins}/{fascist_total})"
