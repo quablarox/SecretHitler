@@ -59,6 +59,38 @@ python ui/kivy_app.py
 python main.py --train --episodes 50000 --players 6 --save qtable.json
 # or directly:
 python -m ai.train --episodes 50000 --players 6 --save qtable.json
+
+# Train against different opponent types
+python main.py --train --episodes 10000 --opponent random   # vs random agents
+python main.py --train --episodes 10000 --opponent mixed    # vs random + rule-based mix
+```
+
+After training, a benchmark automatically evaluates the agent against random,
+rule-based, and mixed opponents, reporting overall and per-role win rates.
+
+### Evaluate a pre-trained agent
+
+```bash
+python main.py --evaluate --qtable qtable.json --episodes 1000 --players 6
+```
+
+### Run all-agent games (no human)
+
+```bash
+python main.py --agents-only 500 --opponent rule --players 6
+python main.py --agents-only 500 --opponent random
+python main.py --agents-only 500 --opponent mixed
+```
+
+### Benchmark from Python
+
+```python
+from ai.train import train, benchmark, evaluate
+
+agent = train(num_episodes=10000, num_players=6, save_path="qtable.json")
+results = benchmark(agent, num_episodes=1000, num_players=6)
+# results is a list of dicts with keys: opponent_type, win_rate,
+# liberal_win_rate, fascist_win_rate, etc.
 ```
 
 ---
@@ -99,3 +131,35 @@ python -m pytest tests/ -v
 | Hitler elected Chancellor (after 3 Fascist policies) | 🟥 **Fascists** |
 
 For more details, check out [Issue #1](https://github.com/quablarox/SecretHitler/issues/1).
+
+---
+
+## AI agent design
+
+### Agent types
+
+| Agent | Strategy | Use case |
+|---|---|---|
+| `RandomAgent` | Uniformly random valid actions | Baseline / control |
+| `RuleBasedAgent` | Hand-crafted heuristics, suspicion tracking | Strong opponent for training |
+| `RLAgent` | Tabular Q-learning with trajectory updates | Trainable agent |
+
+### Training approach
+
+The RL agent can be trained **with different agents as opponents or all the same**.
+Use `--opponent` to select: `random` (all RandomAgent), `rule` (all RuleBasedAgent),
+or `mixed` (randomly alternating).
+
+The training loop uses **curriculum learning**: when training against rule-based
+opponents, the first 50% of episodes use random opponents (easier) so the agent
+learns fundamentals before facing stronger play.
+
+Key RL improvements over a basic Q-learning setup:
+- **Full trajectory updates**: Q-values are propagated backwards through every
+  decision in the game (not just the last one)
+- **Intermediate reward shaping**: Small rewards (+0.1 / −0.1) for each policy
+  enacted that benefits or hurts the agent's side
+- **Semantic actions**: Discard actions encode tile type (`pres_discard_Liberal`)
+  rather than positional index, so the agent learns which *type* of policy to
+  discard regardless of draw order
+- **Three backward passes** per episode for faster bootstrapping
